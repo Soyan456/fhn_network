@@ -1,0 +1,111 @@
+import numpy as np
+from scipy.integrate import solve_ivp
+import matplotlib.pyplot as plt
+import networkx as nx
+
+# Adjusted FHN Parameters
+a = 0.1         # Lower threshold so cascades can actually propagate
+epsilon = 0.01
+gamma = 0.8
+I = 0.0         # Turn off spontaneous auto-firing!
+
+# Network size
+N = 50
+d = 4
+
+# --- Fixed Initial Conditions: A Contiguous Cluster ---
+y0_base = np.zeros(2 * N)
+n_initial_snappers = 5
+
+# Start a connected neighborhood (nodes 0, 1, 2, 3, 4) instead of random nodes
+snapper_indices = np.arange(n_initial_snappers) 
+
+for i in range(N):
+    if i in snapper_indices:
+        y0_base[2 * i] = 0.85  # active/spiking
+    else:
+        y0_base[2 * i] = 0.0   # TRUE resting state
+
+def simulate_network(G, k_val, t_span=(0, 1000)):
+    """Simulates the network for a specific graph G and coupling k."""
+    A = nx.to_scipy_sparse_array(G, format='csr')
+    degrees = np.array([G.degree(i) for i in range(N)])
+    
+    def fhn_vectorized(t, y):
+        v = y[0::2]
+        w = y[1::2]
+        
+        coupling = k_val * (A.dot(v) - degrees * v)
+        
+        dydt = np.zeros(2 * N)
+        dydt[0::2] = v * (v - a) * (1 - v) - w + I + coupling
+        dydt[1::2] = epsilon * (v - gamma * w)
+        return dydt
+
+    sol = solve_ivp(fhn_vectorized, t_span, y0_base, method='RK45', rtol=1e-5, atol=1e-7)
+    
+    # NEW CASCADE MEASUREMENT:
+    # Look at the peak voltage achieved by each node at any point during the run.
+    v_all = sol.y[0::2]
+    
+    # If a node's voltage crosses 0.6 at any point, it successfully fired
+    v_max = np.max(v_all, axis=1) 
+    
+    # Return fraction of nodes that successfully spiked
+    return np.sum(v_max > 0.6) / N
+
+# --- Sweep Parameters ---
+p_range = np.logspace(-3, 0, 12)  
+p_range = np.insert(p_range, 0, 0.0) 
+
+# Lower and tighten the coupling range. High k always quenches FHN!
+k_range = np.linspace(0.01, 0.4, 40)
+
+critical_k = []
+
+print("Running diagnostic parameter sweep...")
+for p in p_range:
+    G = nx.watts_strogatz_graph(N, d, p, seed=42)
+    
+    k_star = None
+    max_cascade = 0.0  # Track the largest cascade we see
+    
+    for k in k_range:
+        cascade_fraction = simulate_network(G, k)
+        max_cascade = max(max_cascade, cascade_fraction)
+        
+        # Lowered the threshold slightly for testing
+        if cascade_fraction >= 0.80: 
+            k_star = k
+            break
+            
+    critical_k.append(k_star if k_star is not None else np.nan)
+    
+    if k_star is None:
+        print(f"p = {p:.4f} -> NO CASCADE. Max activated: {max_cascade*100:.1f}%")
+    else:
+        print(f"p = {p:.4f} -> k* = {k_star:.3f} (Cascade triggered!)")
+
+# --- Plotting ---
+plt.figure(figsize=(10, 6))
+
+# Plot the bifurcation curve
+plt.plot(p_range, critical_k, 'o-', color='darkslateblue', 
+         linewidth=2, markersize=8, label='Critical Coupling ($k^*$)')
+
+# Add the threshold 'a' as a reference line
+plt.axhline(y=a, color='crimson', linestyle='--', alpha=0.7, 
+            label=f'Voltage Threshold (a = {a})')
+
+# Formatting
+plt.xscale('symlog', linthresh=1e-3)
+plt.xlabel('Rewiring Probability (p)', fontsize=12)
+plt.ylabel('Critical Coupling Threshold ($k^*$)', fontsize=12)
+plt.title('Bifurcation Diagram: FHN Cascade on Small-World Network', fontsize=14)
+plt.grid(True, which="both", ls="--", alpha=0.5)
+
+# Adjust y-axis to comfortably fit both the data and the 'a' line
+plt.ylim(0, 0.3) 
+plt.legend(loc='upper left')
+plt.tight_layout()
+plt.show()
